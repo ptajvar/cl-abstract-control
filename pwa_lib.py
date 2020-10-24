@@ -1,9 +1,10 @@
 import numpy as np
 from scipy.optimize import linprog
-from copy import deepcopy
-from zonotope_lib import Box, Zonotope, size_to_box
+from copy import deepcopy, copy
+from zonotope_lib import Box, Zonotope, size_to_box, plot_zonotope
 import gurobipy as gp
-
+from gurobipy import GRB
+import matplotlib.pyplot as plt
 
 class Affine:
     """
@@ -71,6 +72,72 @@ class AffineSys:
         return reachable_set
 
 
+class StateCell:
+    def __init__(self, range_matrix: np.ndarray, layer=0):
+        self.range = range_matrix
+        self.has_child = False
+        self.children = []
+        self.layer = layer
+        self.ndim = range_matrix.shape[0]
+        self.dynamics = None
+        self.multi_step_dynamics = None
+        self.feedback_control = None
+        self.input_use_range = None
+        self.refinement_list = list(range(0, self.ndim))
+
+    def split_cell(self):
+        rl_length = len(self.refinement_list)
+        split_dim = self.refinement_list[self.layer % rl_length]
+        half_point = np.mean(self.range[split_dim, :])
+        self.has_child = True
+
+        child1_range = copy(self.range)
+        child2_range = copy(self.range)
+
+        child1_range[split_dim, 1] = half_point
+        child2_range[split_dim, 0] = half_point
+
+        self.add_child(child1_range)
+        self.add_child(child2_range)
+
+    def add_child(self, state_range):
+        self.children.append(StateCell(state_range, layer=self.layer + 1))
+        self.children[-1].refinement_list = self.refinement_list
+
+    def is_winning(self):
+        if self.has_child:
+            return self.knows_control
+        else:
+            for child in self.children:
+                if not child.is_winning:
+                    return False
+            return True
+
+    def set_controller(self, controller):
+        self.control = controller
+        self.knows_control = True
+
+    def get_controller(self, x: np.ndarray):
+        assert self.contains(x)
+        if self.knows_control:
+            return self.control(x)
+        if self.has_child:
+            for child in self.children:
+                if child.contains(x):
+                    return child.get_controller(x)
+
+    def contains(self, x: np.ndarray):
+        assert x.shape[0] == self.range.shape[0]
+        if np.all(x <= self.range[:, 1]) and np.all(x >= self.range[:, 0]):
+            return True
+        else:
+            return False
+
+    def as_box(self):
+        b = Box(self.range)
+        return b
+
+
 def fit_affine_function(input_data, output_data, solver='gurobi'):
     """
     Fit an affine function to I/O data presented as matrices (ndarrays).
@@ -116,6 +183,7 @@ def fit_affine_function(input_data, output_data, solver='gurobi'):
 
     if solver == 'gurobi':
         m = gp.Model()
+        m.setParam('OutputFlag', 0)
         x = m.addMVar((cost_func.size,), lb=-np.inf)
         m.setObjective(cost_func @ x)
         m.addConstr(A_ub @ x <= b_ub.reshape(len(b_ub)))
@@ -135,9 +203,9 @@ def fit_affine_function(input_data, output_data, solver='gurobi'):
 
 def get_multistep_system(affine_system: AffineSys, n_time_steps) -> AffineSys:
     multi_step_system = deepcopy(affine_system)
-    W0 = affine_system.W
+    W0 = deepcopy(affine_system.W)
     W = deepcopy(affine_system.W)
-    for i in range(n_time_steps):
+    for i in range(n_time_steps - 1):
         multi_step_system.A = np.matmul(affine_system.A, multi_step_system.A)
         multi_step_system.B = np.concatenate((np.matmul(affine_system.A, multi_step_system.B), affine_system.B), axis=1)
         multi_step_system.C = np.matmul(affine_system.A, multi_step_system.C) + affine_system.C
@@ -157,13 +225,35 @@ def get_affine_dynamics(F, state_region: Box, input_region: Box, n_sample=1000):
     return affine_system
 
 
-def can_reach(affine_system: AffineSys, begin: Box, target: Box):
-    begin_center = begin.center
-    target_center = target.center
-    u = np.matmul(np.linalg.pinv(affine_system.B), target_center - affine_system.C - affine_system.A * begin_center)
-    if np.all(u < 10) and np.all(u > -10):
-        return True
-    return False
+# def synthesize_controller(affine_system: AffineSys, state_cell: Box, input_range: Box, target_size: Box):
+#     state_dim = state_cell.ndim
+#     input_dim = input_range.ndim
+#     n_step_input_dim = affine_system.B.shape[1]
+#     state_bounds = np.sum(np.abs(state_cell.generators), axis=1)
+#     input_bounds = np.sum(np.abs(input_range.generators), axis=1)
+#     target_bounds = np.sum(np.abs(target_size.generators), axis=1) - affine_system.W.get_bounding_box_size()
+#     m = gp.Model()
+#     alpha = m.addMVar(1, lb=0, ub=1)
+#     c = m.addMVar((n_step_input_dim, state_dim), lb=-np.inf)
+#     c_abs = m.addMVar((n_step_input_dim, state_dim), lb=0)
+#     for i in range(n_step_input_dim):
+#         i_ind = i % input_dim
+#         m.addConstr(c[i, :] <= c_abs[i, :])
+#         m.addConstr(-c[i, :] <= c_abs[i, :])
+#         m.addConstr(state_bounds @ c_abs[i, :] <= input_bounds[i_ind] * alpha)
+#
+#     A_plus_Bc_abs = m.addMVar((state_dim, state_dim), lb=0)
+#     for i in range(state_dim):
+#         for j in range(state_dim):
+#             m.addConstr(affine_system.B[i, :] @ c[:, j] + affine_system.A[i, j] <= A_plus_Bc_abs[i, j])
+#             m.addConstr(-affine_system.B[i, :] @ c[:, j] - affine_system.A[i, j] <= A_plus_Bc_abs[i, j])
+#
+#     for i in range(state_dim):
+#         m.addConstr(state_bounds @ A_plus_Bc_abs[i, :] <= target_bounds[i])
+#     m.setObjective(1 * alpha)
+#     m.optimize()
+#     feedback_rule = c.X
+#     return feedback_rule, alpha.X
 
 
 def synthesize_controller(affine_system: AffineSys, state_cell: Box, input_range: Box, target_size: Box):
@@ -172,8 +262,10 @@ def synthesize_controller(affine_system: AffineSys, state_cell: Box, input_range
     n_step_input_dim = affine_system.B.shape[1]
     state_bounds = np.sum(np.abs(state_cell.generators), axis=1)
     input_bounds = np.sum(np.abs(input_range.generators), axis=1)
-    target_bounds = np.sum(np.abs(target_size.generators), axis=1) - affine_system.W.get_bounding_box_size()
+    target_bounds = np.sum(np.abs(target_size.generators), axis=1).reshape(state_dim, 1) - \
+                    affine_system.W.get_bounding_box_size() / 2
     m = gp.Model()
+    m.setParam('OutputFlag', 0)
     alpha = m.addMVar(1, lb=0, ub=1)
     c = m.addMVar((n_step_input_dim, state_dim), lb=-np.inf)
     c_abs = m.addMVar((n_step_input_dim, state_dim), lb=0)
@@ -193,20 +285,62 @@ def synthesize_controller(affine_system: AffineSys, state_cell: Box, input_range
         m.addConstr(state_bounds @ A_plus_Bc_abs[i, :] <= target_bounds[i])
     m.setObjective(1 * alpha)
     m.optimize()
-    feedback_rule = c.X
-    return feedback_rule, alpha.X
+    a = GRB.OPTIMAL
+    b = m.getAttr('Status')
+    if m.getAttr('Status') == GRB.OPTIMAL:
+        success = True
+        feedback_rule = c.X
+        closed_loop_system = AffineSys(affine_system.state_size, n_step_input_dim)
+        closed_loop_system.A = affine_system.A + affine_system.B @ feedback_rule
+        closed_loop_system.B = affine_system.B
+        closed_loop_system.C = affine_system.C
+        closed_loop_system.W = affine_system.W
+        return success, feedback_rule, alpha.X, closed_loop_system
+    else:
+        success = False
+        return success, None, None, None
 
 
-def synthesize_controller(affine_system: AffineSys, state_cell: Box, input_range: Box, target_size: Box):
+def steer(affine_system: AffineSys, start_state: np.ndarray, target_state: np.ndarray, input_range: Box,
+          tolerance=None):
+    if tolerance is None:
+        tolerance = np.zeros((affine_system.state_size, 1))
+    input_bounds = np.sum(np.abs(input_range.generators), axis=1)
+    n_step_input_dim = affine_system.B.shape[1]
+    m = gp.Model()
+    m.setParam('OutputFlag', 0)
+    input_less_state = affine_system.A @ start_state + affine_system.C + affine_system.W.center
+    c = m.addMVar((n_step_input_dim,), lb=-np.inf, ub=np.inf)
+    c_abs = m.addMVar((n_step_input_dim,), lb=0, ub=np.inf)
+    for i in range(n_step_input_dim):
+        iid = i % input_bounds.size
+        m.addConstr(c[i] - input_range.center[iid] <= c_abs[i])
+        m.addConstr(-c[i] + input_range.center[iid] <= c_abs[i])
+        m.addConstr(c_abs[i] <= input_bounds[iid])
+    for i in range(affine_system.state_size):
+        m.addConstr(affine_system.B[i, :] @ c + input_less_state[i] - target_state[i] <= tolerance[i])
+        m.addConstr(-(affine_system.B[i, :] @ c + input_less_state[i] - target_state[i]) <= tolerance[i])
+    m.optimize()
+    if m.getAttr('Status') == GRB.OPTIMAL:
+        print("--------------------------------------------------------------------------")
+        success = True
+        return success, c.X
+    else:
+        success = False
+        return success, None
+
+
+def synthesize_controller_cl(affine_system: AffineSys, state_cell: Box, input_range: Box, target_size: Box):
     state_dim = state_cell.ndim
     input_dim = input_range.ndim
     n_step_input_dim = affine_system.B.shape[1]
     state_bounds = np.sum(np.abs(state_cell.generators), axis=1)
     input_bounds = np.sum(np.abs(input_range.generators), axis=1)
-    target_bounds = np.sum(np.abs(target_size.generators), axis=1) - affine_system.W.get_bounding_box_size()
+    target_bounds = np.sum(np.abs(target_size.generators), axis=1)
     m = gp.Model()
+    m.setParam('OutputFlag', 0)
     alpha = m.addMVar(1, lb=0, ub=1)
-    c = m.addMVar((n_step_input_dim, state_dim), lb=-np.inf)
+    c = m.addMVar((input_dim, state_dim), lb=-np.inf)
     c_abs = m.addMVar((n_step_input_dim, state_dim), lb=0)
     for i in range(n_step_input_dim):
         i_ind = i % input_dim
@@ -224,5 +358,69 @@ def synthesize_controller(affine_system: AffineSys, state_cell: Box, input_range
         m.addConstr(state_bounds @ A_plus_Bc_abs[i, :] <= target_bounds[i])
     m.setObjective(1 * alpha)
     m.optimize()
+    m.printStats()
     feedback_rule = c.X
     return feedback_rule, alpha.X
+
+
+class PicewiseAffineSys:
+    def __init__(self, input_box: Box, state_box: Box, refinement_list: list):
+        """
+        :param input_box: allowed inputs
+        :param state_box: The state space where the hybridization is consturcteed
+        :param refinement_list: List of the state dimensions that can be refined during hybridization
+        """
+        self.state_cell = StateCell(state_box.get_range())
+        self.input_box = input_box
+        self.state_cell.refinement_list = refinement_list
+        self.size = 1
+
+    def compute_hybridization(self, F, precision: Box, n_time_steps):
+        cell_list = [self.state_cell]
+        while cell_list:
+            cell = cell_list.pop(0)
+            cell.dynamics = get_affine_dynamics(F, cell.as_box(), self.input_box, 1000)
+            cell.multi_step_dynamics = get_multistep_system(cell.dynamics, n_time_steps)
+            if not precision.contains(cell.multi_step_dynamics.W):
+                cell.split_cell()
+                cell_list = cell_list + cell.children
+                self.size += len(cell.children)
+
+    def __call__(self, x, u):
+        if isinstance(x, np.ndarray):
+            x = x.reshape(x.size, 1)
+            x = Box(np.concatenate((x, x), axis=1))
+        if isinstance(u, np.ndarray):
+            u = u.reshape(u.size, 1)
+            u = Box(np.concatenate((u, u), axis=1))
+        assert isinstance(x, Zonotope)
+        assert isinstance(u, Zonotope)
+        self.compute_reachable_set(x, u)
+
+    def get_parent_cell(self, x: Box) -> StateCell:
+        if not self.state_cell.as_box().contains(x):
+            print("State out of range")
+            return None
+        smallest_cell = self.state_cell
+        while smallest_cell.has_child():
+            children = smallest_cell.children
+            found_valid = False
+            for ch in children:
+                if ch.contains(x):
+                    smallest_cell = ch
+                    found_valid = True
+                    break
+            if not found_valid:
+                break
+        return smallest_cell
+
+
+def compute_pre(pwa_system: PicewiseAffineSys, X: [StateCell, list], input_range: Box, target: Box):
+    if isinstance(X, StateCell):
+        cell_list = [deepcopy(X)]
+    else:
+        cell_list = deepcopy(X)
+    assert isinstance(cell_list, list)
+    while cell_list:
+        x = cell_list.pop(0)
+        affine_dynamics = pwa_system.get_parent_cell(x).multi_step_dynamics

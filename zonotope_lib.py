@@ -26,21 +26,37 @@ class Zonotope:
         SELF = copy(self)
         SELF.ngen += other_zonotope.ngen
         SELF.generators = np.concatenate((self.generators, other_zonotope.generators), axis=1)
+        SELF.center += other_zonotope.center
         return SELF
 
     def __rmul__(self, other):
         SELF = copy(self)
         if isinstance(other, np.ndarray):
             SELF.generators = np.matmul(other, SELF.generators)
+            SELF.center = np.matmul(other, SELF.center)
         else:
             SELF.generators = other * SELF.generators
         return SELF
 
     def __add__(self, other):
-        return self.minkowski_sum(other)
+        SELF = copy(self)
+        if isinstance(other, Zonotope):
+            return SELF.minkowski_sum(other)
+        elif isinstance(other, np.ndarray):
+            SELF.center = self.center+other
+            return SELF
+        elif isinstance(other, float):
+            SELF.center = self.center + other
+            return SELF
+
 
     def get_bounding_box_size(self):
-        return np.sum(np.abs(self.generators), axis=1)
+        return np.sum(np.abs(self.generators), axis=1).reshape(self.ndim, 1) * 2
+
+    def get_range(self):
+        range = np.concatenate((self.center-self.get_bounding_box_size()/2, self.center+self.get_bounding_box_size()/2),
+                               axis=1)
+        return range
 
     def get_bounding_box(self):
         size_vect = self.get_bounding_box_size()
@@ -51,6 +67,7 @@ class Zonotope:
     def get_inner_box(self):
         size_vect = self.get_bounding_box_size()
         m = gp.Model()
+        m.setParam('OutputFlag', 0)
         alpha = m.addMVar(1, lb=0, ub=1)
         beta = m.addMVar((self.ndim, self.ngen), lb=-np.inf, ub=np.inf)
         beta_abs = m.addMVar((self.ndim, self.ngen), lb=0, ub=np.inf)
@@ -60,7 +77,7 @@ class Zonotope:
 
         for i in range(self.ngen):
             vect = np.ones((self.ndim, ))
-            m.addConstr(vect @ beta_abs[:, i] <= 1)
+            m.addConstr(vect @ beta_abs[:, i] <= 2)
 
         for i in range(self.ndim):
             g = self.generators[i, :]
@@ -103,11 +120,32 @@ class Box(Zonotope):
         center = np.mean(interval_ranges, axis=1)
         Zonotope.__init__(self, generators=generators, center=center)
 
+    def contains(self, z: Zonotope):
+        b = z.get_bounding_box()
+        b_lb = b.center-np.sum(b.generators, axis=1)
+        b_ub = b.center+np.sum(b.generators, axis=1)
+        lb = self.center-np.sum(self.generators, axis=1)
+        ub = self.center+np.sum(self.generators, axis=1)
+        if np.all(lb <= b_lb) and np.all(b_ub <= ub):
+            return True
+        else:
+            return False
+
+    def intersects(self, b: "Box"):
+        b_lb = b.center - np.sum(b.generators, axis=1)
+        b_ub = b.center + np.sum(b.generators, axis=1)
+        lb = self.center - np.sum(self.generators, axis=1)
+        ub = self.center + np.sum(self.generators, axis=1)
+        if np.all(lb <= b_ub) and np.all(b_lb <= ub):
+            return True
+        else:
+            return False
+
 
 def size_to_box(size_vector: np.ndarray) -> Box:
     ndim = size_vector.shape[0]
-    size_vector = size_vector.reshape((ndim,1))
-    box = Box(np.concatenate((-size_vector, size_vector), axis=1))
+    size_vector = size_vector.reshape((ndim, 1))
+    box = Box(np.concatenate((-size_vector/2, size_vector/2), axis=1))
     return box
 
 
