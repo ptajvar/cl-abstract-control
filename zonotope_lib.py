@@ -4,7 +4,10 @@ import matplotlib.pyplot as plt
 from copy import copy
 import gurobipy as gp
 
+
 class Zonotope:
+    ndim: int
+
     def __init__(self, generators: np.ndarray, center: np.ndarray):
         if len(generators.shape) == 1:
             generators = generators.reshape(generators.shape[0], 1)
@@ -43,19 +46,19 @@ class Zonotope:
         if isinstance(other, Zonotope):
             return SELF.minkowski_sum(other)
         elif isinstance(other, np.ndarray):
-            SELF.center = self.center+other
+            SELF.center = self.center + other
             return SELF
         elif isinstance(other, float):
             SELF.center = self.center + other
             return SELF
 
-
     def get_bounding_box_size(self):
         return np.sum(np.abs(self.generators), axis=1).reshape(self.ndim, 1) * 2
 
     def get_range(self):
-        range = np.concatenate((self.center-self.get_bounding_box_size()/2, self.center+self.get_bounding_box_size()/2),
-                               axis=1)
+        range = np.concatenate(
+            (self.center - self.get_bounding_box_size() / 2, self.center + self.get_bounding_box_size() / 2),
+            axis=1)
         return range
 
     def get_bounding_box(self):
@@ -76,7 +79,7 @@ class Zonotope:
             m.addConstr(-beta[i, :] <= beta_abs[i, :])
 
         for i in range(self.ngen):
-            vect = np.ones((self.ndim, ))
+            vect = np.ones((self.ndim,))
             m.addConstr(vect @ beta_abs[:, i] <= 2)
 
         for i in range(self.ndim):
@@ -92,7 +95,6 @@ class Zonotope:
         box = size_to_box(alpha.X * size_vect)
         box.center = self.center
         return box
-
 
     __array_priority__ = 10000
 
@@ -120,22 +122,33 @@ class Box(Zonotope):
         center = np.mean(interval_ranges, axis=1)
         Zonotope.__init__(self, generators=generators, center=center)
 
-    def contains(self, z: Zonotope):
-        b = z.get_bounding_box()
-        b_lb = b.center-np.sum(b.generators, axis=1)
-        b_ub = b.center+np.sum(b.generators, axis=1)
-        lb = self.center-np.sum(self.generators, axis=1)
-        ub = self.center+np.sum(self.generators, axis=1)
-        if np.all(lb <= b_lb) and np.all(b_ub <= ub):
-            return True
-        else:
-            return False
+    def contains(self, z: [Zonotope, np.ndarray]):
+        if isinstance(z, Zonotope):
+            b = z.get_bounding_box()
+            s = self.get_bounding_box()
+            ndim = b.ndim
+            b_lb = b.center - np.sum(b.generators, axis=1).reshape(ndim, 1)
+            b_ub = b.center + np.sum(b.generators, axis=1).reshape(ndim, 1)
+            s_lb = s.center - np.sum(s.generators, axis=1).reshape(ndim, 1)
+            s_ub = s.center + np.sum(s.generators, axis=1).reshape(ndim, 1)
+            if np.all(s_lb <= b_lb + 1e-10) and np.all(b_ub <= s_ub + 1e-10):
+                return True
+            else:
+                return False
+        elif isinstance(z, np.ndarray):
+            s_lb = s.center - np.sum(s.generators, axis=1).reshape(ndim, 1)
+            s_ub = s.center + np.sum(s.generators, axis=1).reshape(ndim, 1)
+            if np.all(s_lb <= z + 1e-10) and np.all(z <= s_ub + 1e-10):
+                return True
+            else:
+                return False
 
     def intersects(self, b: "Box"):
-        b_lb = b.center - np.sum(b.generators, axis=1)
-        b_ub = b.center + np.sum(b.generators, axis=1)
-        lb = self.center - np.sum(self.generators, axis=1)
-        ub = self.center + np.sum(self.generators, axis=1)
+        ndim = b.ndim
+        b_lb = b.center - np.sum(b.generators, axis=1).reshape(ndim, 1)
+        b_ub = b.center + np.sum(b.generators, axis=1).reshape(ndim, 1)
+        lb = self.center - np.sum(self.generators, axis=1).reshape(ndim, 1)
+        ub = self.center + np.sum(self.generators, axis=1).reshape(ndim, 1)
         if np.all(lb <= b_ub) and np.all(b_lb <= ub):
             return True
         else:
@@ -145,7 +158,7 @@ class Box(Zonotope):
 def size_to_box(size_vector: np.ndarray) -> Box:
     ndim = size_vector.shape[0]
     size_vector = size_vector.reshape((ndim, 1))
-    box = Box(np.concatenate((-size_vector/2, size_vector/2), axis=1))
+    box = Box(np.concatenate((-size_vector / 2, size_vector / 2), axis=1))
     return box
 
 
@@ -153,7 +166,8 @@ def plot_zonotope(zonotope: Zonotope, color='r--', fill=True):
     corneres = zonotope.get_corners().T
     hull = ConvexHull(corneres)
     if fill:
-        plt.fill(corneres[hull.vertices, 0], corneres[hull.vertices, 1], color)
+        fig = plt.fill(corneres[hull.vertices, 0], corneres[hull.vertices, 1], color)
     else:
         vertices = np.concatenate((hull.vertices, hull.vertices[0:1]))
-        plt.plot(corneres[vertices, 0], corneres[vertices, 1], color)
+        fig = plt.plot(corneres[vertices, 0], corneres[vertices, 1], color)
+    return fig
