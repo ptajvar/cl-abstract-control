@@ -123,10 +123,10 @@ class Box(Zonotope):
         Zonotope.__init__(self, generators=generators, center=center)
 
     def contains(self, z: [Zonotope, np.ndarray]):
+        s = self.get_bounding_box()
+        ndim = s.ndim
         if isinstance(z, Zonotope):
             b = z.get_bounding_box()
-            s = self.get_bounding_box()
-            ndim = b.ndim
             b_lb = b.center - np.sum(b.generators, axis=1).reshape(ndim, 1)
             b_ub = b.center + np.sum(b.generators, axis=1).reshape(ndim, 1)
             s_lb = s.center - np.sum(s.generators, axis=1).reshape(ndim, 1)

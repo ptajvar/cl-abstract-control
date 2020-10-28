@@ -134,15 +134,15 @@ class StateCell:
 
     def get_closed_loop_dynamics(self, input_box=None, target_size=None):
         if self.closed_loop_dynamics is not None:
-            return self.closed_loop_dynamics, self.input_use_range
+            return self.closed_loop_dynamics, self.input_use_range, self.feedback_control
         multisys = self.multi_step_dynamics
         assert isinstance(multisys, AffineSys)
         # error_bound = multisys.W.get_bounding_box_size()
         # t_size = target_size.get_bounding_box_size()
         # t_size[t_size < error_bound] = error_bound[t_size < error_bound]
         # target_size = 1.01*size_to_box(t_size)
-        target_size = multisys.W.get_bounding_box()
-        start_size = 1.51 * target_size
+        # target_size = multisys.W.get_bounding_box()
+        start_size = 1.02 * target_size
         # start_size.generators[1, 1] += 1.0
         success, feedback_rule, alpha, closed_loop_system = synthesize_controller(affine_system=multisys,
                                                                                   state_cell=start_size,
@@ -154,12 +154,12 @@ class StateCell:
             self.closed_loop_dynamics = closed_loop_system
             self.input_use_range = alpha
             # print(alpha)
-            return self.closed_loop_dynamics, self.input_use_range
+            return self.closed_loop_dynamics, self.input_use_range, feedback_rule
         else:
             # print("no feedback!")
             self.closed_loop_dynamics = self.multi_step_dynamics
             self.input_use_range = 0.0
-            return self.multi_step_dynamics, 0.0
+            return self.multi_step_dynamics, 0.0, None
 
     def get_controller(self, x: np.ndarray):
         assert self.contains(x)
@@ -169,6 +169,24 @@ class StateCell:
             for child in self.children:
                 if child.as_box().contains(x):
                     return child.get_controller(x)
+
+    def get_cell_min_stage(self, x: np.ndarray) -> 'StateCell':
+        current_valid = self.as_box().contains(x)
+        nominee = None
+        nominee_stage = np.inf
+        if current_valid:
+            if self.is_winning:
+                nominee = self
+                nominee_stage = self.stage
+            if self.has_child():
+                for ch in self.children:
+                    assert isinstance(ch, StateCell)
+                    candidate = ch.get_cell_min_stage(x)
+                    if candidate is not None:
+                        if candidate.stage is not None and candidate.stage < nominee_stage:
+                            nominee = candidate
+                            nominee_stage = candidate.stage
+        return nominee
 
     def as_box(self):
         b = Box(self.range)
@@ -486,7 +504,7 @@ def compute_pre(pwa_system: PiecewiseAffineSys, X: StateCell, input_range: Box, 
             break
         # print(x.as_box().get_bounding_box_size())
         assert isinstance(x, StateCell)
-        if np.all(x.as_box().get_bounding_box_size() < winning_size/4):
+        if np.all(x.as_box().get_bounding_box_size() < winning_size / 4):
             print("not worth it")
             break
         parent_cell = pwa_system.get_parent_cell(x)
@@ -495,10 +513,11 @@ def compute_pre(pwa_system: PiecewiseAffineSys, X: StateCell, input_range: Box, 
         if not reachable_set.get_bounding_box().intersects(target):
             # print('boo')
             continue
-        cl_dynamics, alpha = parent_cell.get_closed_loop_dynamics(input_range, target)
+        cl_dynamics, alpha, feedback_rule = parent_cell.get_closed_loop_dynamics(input_range, target)
 
         assert isinstance(alpha, float)
-        # if alpha > 0.0:
+        if alpha > 0.0:
+            x.feedback_control = feedback_rule
         tolerance = target.get_bounding_box_size() - cl_dynamics.compute_reachable_set(x.as_box(
 
         )).get_bounding_box_size()

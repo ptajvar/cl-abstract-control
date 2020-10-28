@@ -1,51 +1,38 @@
-import numpy as np
-from dynamics_library import SampleAndHold, PendulumCartContinuous
-from copy import copy, deepcopy
-import matplotlib
-import matplotlib.pyplot as plt
-import zonotope_lib as ztp
 import pwa_lib as pwa
-import matplotlib.animation as animation
+import zonotope_lib as ztp
+import numpy as np
 import time
-import pickle
+from dynamics_library import DoubleIntegrator, SampleAndHold
+import matplotlib.pyplot as plt
+from copy import copy
 
-f = PendulumCartContinuous()
+f = DoubleIntegrator()
 sample_time = 0.01
 F = SampleAndHold(continuous_function=f, sample_time=sample_time)
 
-input_min = -5
+input_min = -1
 input_max = -input_min
 input_box = ztp.Box(np.array([[input_min, input_max]]))
-theta_min = -2.0
-theta_max = 2.0
-theta_dot_min = -3.2
-theta_dot_max = 3.2
-n_steps = 5
-state_box = ztp.Box(np.array([[theta_min, theta_max], [theta_dot_min, theta_dot_max]]))
+x_min = -0.05
+x_max = 0.05
+v_min = -0.15
+v_max = 0.15
+n_steps = 10
+state_box = ztp.Box(np.array([[x_min, x_max], [v_min, v_max]]))
 
-core_target = ztp.size_to_box(np.array([[0.8], [6.4]]))
-target = core_target
-# target, linear_ctrl = pwa.get_attraction(F, core_target, 0.1*input_box, n_steps)
-
+target = ztp.size_to_box(np.array([[0.1], [0.1]]))
 H = pwa.PiecewiseAffineSys(state_box=state_box, input_box=input_box, refinement_list=[0])  # only refine angle
 precision = 0.9*target
-
-start_time = time.time()
 H.compute_hybridization(F, precision, input_box=input_box, n_time_steps=n_steps)
+print(H.size)
 
-with open('hybridization_5step_2.0.pickle', 'wb') as handle:
-    pickle.dump(H, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-print("hybridization time: {}".format(time.time() - start_time))
-print("Number of hybridization nodes: {}".format(H.size))
-start_time = time.time()
-iterations = 5
+iterations = 1
 # cells = H.state_cell.get_bare_copy()
 cells = pwa.StateCell(state_box.get_range())
 target_list = [target]
 colors = ['g', 'y', 'k', 'r', 'b']
 tot_time = time.time()
-ztp.plot_zonotope(target)
+start_time = time.time()
 for i in range(iterations):
     best_layer = 100
     while target_list:
@@ -73,12 +60,39 @@ for i in reversed(range(iterations)):
     cell_list = [cells]
     while cell_list:
         cell = cell_list.pop(0)
-        if cell.stage == i:
+        if cell.is_winning:
+            cell.stage = 0
             ztp.plot_zonotope(cell.as_box(), color=colors[i % len(colors)], fill=False)
         else:
             cell_list += cell.children
 
-with open('cell_control_5step_big', 'wb') as handle:
-    pickle.dump(cells, handle, protocol=pickle.HIGHEST_PROTOCOL)
+ztp.plot_zonotope(target, color='c')
 
-plt.show()
+
+x_0 = np.array([[-0.04], [-0.10]])
+x = copy(x_0)
+x_hist = [copy(x)]
+u_hist = []
+t_step = 0.01
+control = np.array([[]])
+for t in np.arange(0, 10, t_step):
+    if control.size == 0:
+        cell = cells.get_cell_min_stage(x)
+        a = ztp.plot_zonotope(cell.as_box(), color='r', fill=False)
+        plt.show()
+        p = a.pop(-1)
+        p.remove()
+        if cell.feedback_control is None:
+            control = cell.feedfwd_control
+        else:
+            control = cell.feedback_control @ (x - cell.as_box().center) + cell.feedfwd_control
+    u = control[0].reshape((1, 1))
+    control = np.delete(control, 0)
+    plt.plot(x[0], x[1], 'b*')
+    x = F(x, u)
+    u_hist.append(copy(u))
+    x_hist.append(copy(x))
+
+
+
+

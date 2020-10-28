@@ -27,6 +27,25 @@ class PendulumCartContinuous:
         return x_dot
 
 
+class DoubleIntegrator:
+    def __init__(self):
+        self.i = 1
+
+    def __call__(self, x, u):
+        if len(x.shape) == 1:
+            x = x.reshape(x.shape[0], 1)
+        if len(u.shape) == 1:
+            u = u.reshape(u.shape[0], 1)
+        assert x.shape[0] == 2
+        assert u.shape[0] == 1
+        assert x.shape[1] == u.shape[1]
+        n_points = x.shape[1]
+        x_dot = np.zeros(x.shape)
+        x_dot[0, :] = x[1, :]
+        x_dot[1, :] = u * self.i
+        return x_dot
+
+
 class SampleAndHold:
     def __init__(self, continuous_function: types.FunctionType, sample_time: float, discretization_step=-1):
         assert inspect.isclass(type(continuous_function)) or isinstance(continuous_function, types.FunctionType)
