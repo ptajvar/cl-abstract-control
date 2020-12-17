@@ -5,6 +5,7 @@ from copy import copy
 import gurobipy as gp
 
 
+
 class Zonotope:
     ndim: int
 
@@ -131,14 +132,14 @@ class Box(Zonotope):
             b_ub = b.center + np.sum(b.generators, axis=1).reshape(ndim, 1)
             s_lb = s.center - np.sum(s.generators, axis=1).reshape(ndim, 1)
             s_ub = s.center + np.sum(s.generators, axis=1).reshape(ndim, 1)
-            if np.all(s_lb <= b_lb + 1e-10) and np.all(b_ub <= s_ub + 1e-10):
+            if np.all(s_lb <= b_lb + 1e-12) and np.all(b_ub <= s_ub + 1e-12):
                 return True
             else:
                 return False
         elif isinstance(z, np.ndarray):
             s_lb = s.center - np.sum(s.generators, axis=1).reshape(ndim, 1)
             s_ub = s.center + np.sum(s.generators, axis=1).reshape(ndim, 1)
-            if np.all(s_lb <= z + 1e-10) and np.all(z <= s_ub + 1e-10):
+            if np.all(s_lb <= z + 1e-12) and np.all(z <= s_ub + 1e-12):
                 return True
             else:
                 return False

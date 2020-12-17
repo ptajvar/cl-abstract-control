@@ -13,7 +13,7 @@ f = PendulumCartContinuous()
 sample_time = 0.01
 F = SampleAndHold(continuous_function=f, sample_time=sample_time)
 
-input_min = -5
+input_min = -1
 input_max = -input_min
 input_box = ztp.Box(np.array([[input_min, input_max]]))
 theta_min = -2.0

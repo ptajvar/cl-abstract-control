@@ -71,11 +71,11 @@ class AffineSys:
         reachable_set.generators = np.concatenate((reachable_set.generators, self.W.generators), axis=1)
         reachable_set.center = np.matmul(self.A, start_set.center) + self.C + self.W.center
         # reachable_set.generators = np.concatenate((reachable_set.generators, self.error_term), axis=1)
-        reachable_set.ngen = reachable_set.generators.shape[1]
         if input_range is not None:
             n_steps = int(self.B.shape[1] / input_range.generators.shape[0])
             in_gen = np.tile(input_range.generators, (n_steps, 1))
             reachable_set.generators = np.concatenate((reachable_set.generators, np.matmul(self.B, in_gen)), axis=1)
+        reachable_set.ngen = reachable_set.generators.shape[1]
         return reachable_set
 
 
@@ -500,13 +500,13 @@ def compute_pre(pwa_system: PiecewiseAffineSys, X: StateCell, input_range: Box, 
         if x.fully_solved():
             continue
             print("hoi")
-        if np.all(x.as_box().get_bounding_box_size() < target.get_bounding_box_size() / 8):
+        if np.all(x.as_box().get_bounding_box_size() < target.get_bounding_box_size() / 16):
             break
         # print(x.as_box().get_bounding_box_size())
         assert isinstance(x, StateCell)
-        if np.all(x.as_box().get_bounding_box_size() < winning_size / 4):
-            print("not worth it")
-            break
+        # if np.all(x.as_box().get_bounding_box_size() < winning_size / 4):
+        #     print("not worth it")
+        #     break
         parent_cell = pwa_system.get_parent_cell(x)
         affine_dynamics = parent_cell.get_multistep_dynamics()
         reachable_set = affine_dynamics.compute_reachable_set(x.as_box(), input_range)
@@ -514,17 +514,17 @@ def compute_pre(pwa_system: PiecewiseAffineSys, X: StateCell, input_range: Box, 
             # print('boo')
             continue
         cl_dynamics, alpha, feedback_rule = parent_cell.get_closed_loop_dynamics(input_range, target)
-
+        x.multi_step_dynamics = deepcopy(affine_dynamics)
+        x.closed_loop_dynamics = deepcopy(cl_dynamics)
         assert isinstance(alpha, float)
         if alpha > 0.0:
             x.feedback_control = feedback_rule
-        tolerance = target.get_bounding_box_size() - cl_dynamics.compute_reachable_set(x.as_box(
+        tolerance = (target.get_bounding_box_size() - cl_dynamics.compute_reachable_set(x.as_box(
 
-        )).get_bounding_box_size()
-        success, ctrl = steer(affine_system=cl_dynamics, start_state=x.as_box().center, input_range=(
-                                                                                                            1 - alpha) * input_range,
-                              target_state=target.center,
-                              tolerance=tolerance)
+        )).get_bounding_box_size()) / 2
+
+        success, ctrl = steer(affine_system=affine_dynamics, start_state=x.as_box().center,
+                              input_range=(1 - alpha) * input_range, target_state=target.center, tolerance=tolerance)
         # else:
         #     print("no feedback")
         #     success = False
