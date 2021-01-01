@@ -38,6 +38,7 @@ class Zonotope:
         if isinstance(other, np.ndarray):
             SELF.generators = np.matmul(other, SELF.generators)
             SELF.center = np.matmul(other, SELF.center)
+            SELF.ndim = SELF.generators.shape[0]
         else:
             SELF.generators = other * SELF.generators
         return SELF
@@ -163,12 +164,12 @@ def size_to_box(size_vector: np.ndarray) -> Box:
     return box
 
 
-def plot_zonotope(zonotope: Zonotope, color='r--', fill=True):
+def plot_zonotope(zonotope: Zonotope, color='r--', fill=True, linewidth=1):
     corneres = zonotope.get_corners().T
     hull = ConvexHull(corneres)
     if fill:
-        fig = plt.fill(corneres[hull.vertices, 0], corneres[hull.vertices, 1], color)
+        fig = plt.fill(corneres[hull.vertices, 0], corneres[hull.vertices, 1], color, linewidth=linewidth)
     else:
         vertices = np.concatenate((hull.vertices, hull.vertices[0:1]))
-        fig = plt.plot(corneres[vertices, 0], corneres[vertices, 1], color)
+        fig = plt.plot(corneres[vertices, 0], corneres[vertices, 1], color, linewidth=linewidth)
     return fig

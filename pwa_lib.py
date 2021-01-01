@@ -4,7 +4,6 @@ from copy import deepcopy, copy
 from zonotope_lib import Box, Zonotope, size_to_box, plot_zonotope
 import gurobipy as gp
 from gurobipy import GRB
-import matplotlib.pyplot as plt
 import time
 
 
@@ -65,19 +64,46 @@ class AffineSys:
         SELF.A = SELF.A + np.matmul(SELF.B, feedback_matrix)
         return SELF
 
+    def get_rx(self, start_set: Box) -> Zonotope:
+        rx = self.A * start_set
+        rx.center = rx.center + self.C
+        return rx
+
+    def get_rx_cl(self, feedback_rule, start_set: Box) -> Zonotope:
+        rx = (self.A + self.B@feedback_rule) * start_set
+        rx.center = self.A@start_set.center
+        rx.center = rx.center + self.C
+        return rx
+
+    def get_ru(self, input: [Box, np.ndarray]) -> Zonotope:
+        if isinstance(input, Box):
+            return self.B * input
+        elif isinstance(input, np.ndarray):
+            output = self.B @ input
+            output = output.reshape((len(output), 1))
+            output_as_range = np.concatenate((output, output), 1)
+            output_box = Box(output_as_range)
+            return output_box
+        elif isinstance(input, float):
+            output = self.B * input
+            output = output.reshape((len(output), 1))
+            output_as_range = np.concatenate((output, output), 1)
+            output_box = Box(output_as_range)
+            return output_box
+
     def compute_reachable_set(self, start_set: Box, input_range: Box = None) -> Zonotope:
-        reachable_set = Zonotope(np.zeros((start_set.ndim, 0)), np.zeros((start_set.ndim, 1)))
-        reachable_set.generators = np.matmul(self.A, start_set.generators)
-        reachable_set.generators = np.concatenate((reachable_set.generators, self.W.generators), axis=1)
-        reachable_set.center = np.matmul(self.A, start_set.center) + self.C + self.W.center
-        # reachable_set.generators = np.concatenate((reachable_set.generators, self.error_term), axis=1)
+        reachable_set = self.get_rx(start_set)
         if input_range is not None:
-            n_steps = int(self.B.shape[1] / input_range.generators.shape[0])
-            in_gen = np.tile(input_range.generators, (n_steps, 1))
-            reachable_set.generators = np.concatenate((reachable_set.generators, np.matmul(self.B, in_gen)), axis=1)
-        reachable_set.ngen = reachable_set.generators.shape[1]
+            reachable_set = reachable_set + self.get_ru(input_range)
+        reachable_set = reachable_set + self.W
         return reachable_set
 
+    def compute_reachable_set_cl(self,feedback_rule, start_set: Box, input_range: Box = None) -> Zonotope:
+        reachable_set = self.get_rx_cl(feedback_rule, start_set)
+        if input_range is not None:
+            reachable_set = reachable_set + self.get_ru(input_range)
+        reachable_set = reachable_set + self.W
+        return reachable_set
 
 class StateCell:
     def __init__(self, range_matrix: np.ndarray, layer=0):
@@ -115,8 +141,10 @@ class StateCell:
         self.add_child(child2_range)
 
     def add_child(self, state_range):
-        self.children.append(StateCell(state_range, layer=self.layer + 1))
-        self.children[-1].refinement_list = self.refinement_list
+        child = StateCell(state_range, layer=self.layer + 1)
+        child.refinement_list = self.refinement_list
+        child.multi_step_dynamics = self.multi_step_dynamics
+        self.children.append(child)
 
     def fully_solved(self):
         if self.is_winning:
@@ -201,6 +229,19 @@ class StateCell:
             for i in self.children:
                 bare_copy.children.append(i.get_bare_copy())
         return bare_copy
+
+    def compute_multistep_affine(self, F, n_time_steps: int, input_box: Box) -> AffineSys:
+        self.multi_step_dynamics = compute_multistep_affine_dynamics(F, n_time_steps, self.as_box(), input_box)
+        return multistep_dynamics
+
+def augment_dynamics(dynamics1: AffineSys, dynamics2: AffineSys):
+    assert dynamics1.state_size == dynamics2.state_size and dynamics1.input_size == dynamics2.input_size
+    augmented_dynamics = AffineSys(dynamics1.state_size, dynamics1.input_size)
+    augmented_dynamics.A = dynamics2.A @ dynamics1.A
+    augmented_dynamics.B = np.concatenate((dynamics2.A @ dynamics1.B, dynamics2.B), axis=1)
+    augmented_dynamics.W = (dynamics2.A * dynamics1.W.minkowski_sum(dynamics2.W)).get_bounding_box()
+    augmented_dynamics.C = dynamics2.A @ dynamics1.C + dynamics2.C
+    return augmented_dynamics
 
 
 def fit_affine_function(input_data, output_data, solver='gurobi'):
@@ -289,6 +330,16 @@ def get_affine_dynamics(F, state_region: Box, input_region: Box, n_sample=1000):
     affine_system.init_from_affine_func(affine_func=affine_func, state_index_list=list(range(0, state_region.ndim)))
     return affine_system
 
+def compute_multistep_affine_dynamics(F, n_time_steps: int, state_box: Box, input_box: Box) -> AffineSys:
+    reachable_set = deepcopy(state_box)
+    dynamics = get_affine_dynamics(F, reachable_set, input_box, 1000)
+    multistep_dynamics = deepcopy(dynamics)
+    for i in range(n_time_steps - 1):
+        reachable_set = dynamics.compute_reachable_set(reachable_set, input_box)
+        dynamics = get_affine_dynamics(F, reachable_set, input_box, 1000)
+        multistep_dynamics = augment_dynamics(multistep_dynamics, dynamics)
+    return multistep_dynamics
+
 
 # def synthesize_controller(affine_system: AffineSys, state_cell: Box, input_range: Box, target_size: Box):
 #     state_dim = state_cell.ndim
@@ -321,7 +372,7 @@ def get_affine_dynamics(F, state_region: Box, input_region: Box, n_sample=1000):
 #     return feedback_rule, alpha.X
 
 
-def synthesize_controller(affine_system: AffineSys, state_cell: Box, input_range: Box, target_size: Box):
+def synthesize_controller(affine_system: AffineSys, state_cell: Box, input_range: Box, target_size: Box, unbounded=False):
     state_dim = state_cell.ndim
     input_dim = input_range.ndim
     n_step_input_dim = affine_system.B.shape[1]
@@ -334,7 +385,11 @@ def synthesize_controller(affine_system: AffineSys, state_cell: Box, input_range
         return success, None, None, None
     m = gp.Model()
     m.setParam('OutputFlag', 0)
-    alpha = m.addMVar(1, lb=0, ub=1)
+    if unbounded:
+        alpha_ub = np.inf
+    else:
+        alpha_ub = 1
+    alpha = m.addMVar(1, lb=0, ub=alpha_ub)
     c = m.addMVar((n_step_input_dim, state_dim), lb=-np.inf)
     c_abs = m.addMVar((n_step_input_dim, state_dim), lb=0)
     for i in range(n_step_input_dim):
@@ -445,12 +500,13 @@ class PiecewiseAffineSys:
         self.state_cell.refinement_list = refinement_list
         self.size = 1
 
-    def compute_hybridization(self, F, precision: Box, n_time_steps, input_box: Box):
+    def compute_hybridization(self, F, precision: Box, n_time_steps: int, input_box: Box):
         cell_list = [self.state_cell]
         while cell_list:
             cell = cell_list.pop(0)
             cell.dynamics = get_affine_dynamics(F, cell.as_box(), input_box, 2000)
-            cell.multi_step_dynamics = get_multistep_system(cell.dynamics, n_time_steps)
+            # cell.multi_step_dynamics = get_multistep_system(cell.dynamics, n_time_steps)
+            cell.compute_multistep_affine(F, n_time_steps, input_box)
             if not precision.contains(cell.multi_step_dynamics.W):
                 cell.split_cell()
                 cell_list = cell_list + cell.children
@@ -468,8 +524,11 @@ class PiecewiseAffineSys:
         self.compute_reachable_set(x, u)
 
     def get_parent_cell(self, x: Box) -> StateCell:
-        if isinstance(x, StateCell):
+        if isinstance(x, np.ndarray):
+            x = Box(np.array([[x[0], x[0]], [x[1], x[1]]]))
+        elif isinstance(x, StateCell):
             x = x.as_box()
+        assert isinstance(x, Box)
         if not self.state_cell.as_box().contains(x):
             print("State out of range")
             return None
@@ -492,14 +551,13 @@ def compute_pre(pwa_system: PiecewiseAffineSys, X: StateCell, input_range: Box, 
     start_time = time.time()
     X_new = deepcopy(X)
     cell_list = [X_new]
-    pre_set = []
     while cell_list:
         # if time.time() - start_time > 10:
         #     break
         x = cell_list.pop(0)
         if x.fully_solved():
+            # print("hoi")
             continue
-            print("hoi")
         if np.all(x.as_box().get_bounding_box_size() < target.get_bounding_box_size() / 16):
             break
         # print(x.as_box().get_bounding_box_size())
@@ -539,6 +597,87 @@ def compute_pre(pwa_system: PiecewiseAffineSys, X: StateCell, input_range: Box, 
             else:
                 x.split_cell()
                 cell_list = cell_list + x.children
+    return X_new
+
+
+def compute_pre2(F, n_time_steps, X: StateCell, input_range: Box, target: Box):
+    winning_size = np.zeros(target.center.shape)
+    input_range_multi = input_range.get_range()
+    input_range_multi = Box(np.tile(input_range_multi, (n_time_steps, 1)))
+    X_new = deepcopy(X)
+    cell_list = [X_new]
+    while cell_list:
+        cell = cell_list.pop(0)
+        if cell.fully_solved():
+            continue
+        if np.all(cell.as_box().get_bounding_box_size() < target.get_bounding_box_size() / 16):
+            continue
+        if np.all(cell.as_box().get_bounding_box_size() < winning_size / 2):
+            print("not worth it")
+            break
+        cell.compute_multistep_affine(F, n_time_steps, input_range)
+        assert isinstance(cell.multi_step_dynamics, AffineSys)
+        ru = cell.multi_step_dynamics.get_ru(input_range_multi)
+        ru_inv = copy(ru)
+        ru_inv.center = -ru_inv.center
+        pre_target_over = target.minkowski_sum(cell.multi_step_dynamics.W).minkowski_sum(ru_inv)
+        if np.all(target.get_bounding_box_size()>=cell.multi_step_dynamics.W.get_bounding_box_size()):
+            target_under = target.get_bounding_box()
+            target_under.generators = target.generators - cell.multi_step_dynamics.W.get_bounding_box().generators
+            target_under.center = target_under.center - cell.multi_step_dynamics.W.center
+            pre_target_under = target_under.minkowski_sum(ru_inv)
+        else:
+            pre_target_under = None
+        sub_list = [cell]
+        while sub_list:
+            sub_cell = sub_list.pop(0)
+            if np.all(sub_cell.as_box().get_bounding_box_size() < winning_size / 2):
+                print("not worth it")
+                break
+            if np.all(sub_cell.as_box().get_bounding_box_size() < target.get_bounding_box_size() / 16):
+                continue
+            assert isinstance(sub_cell.multi_step_dynamics, AffineSys)
+            rx = sub_cell.multi_step_dynamics.get_rx(sub_cell.as_box())
+            if pre_target_over.intersects(rx):
+                if pre_target_over.contains(rx):
+                    if pre_target_under and pre_target_under.contains(rx):
+                        winning_size = np.maximum(winning_size, sub_cell.as_box().get_bounding_box_size())
+                        sub_cell.is_winning = True
+                    else:
+                        sub_cell.split_cell()
+                        cell_list = cell_list + sub_cell.children
+                else:
+                    sub_cell.split_cell()
+                    sub_list = sub_list + sub_cell.children
+            else:
+                continue
+    return X_new
+
+def compute_pre_rocs(reachset_func, X: StateCell, input_list: list, check_included, check_intersects):
+    X_new = deepcopy(X)
+    cell_list = [X_new]
+    initial_size = X_new.as_box().get_bounding_box_size()
+    winning_size = np.zeros((2,1))
+    while cell_list:
+        cell = cell_list.pop(0)
+        if cell.fully_solved():
+            continue
+        if np.all(cell.as_box().get_bounding_box_size() < initial_size / 16):
+            continue
+        intersecting = False
+        for input in input_list:
+            reachable_set = reachset_func(cell.as_box(), input)
+            assert isinstance(reachable_set, Zonotope)
+            if check_included(reachable_set.get_bounding_box()):
+                winning_size = np.maximum(winning_size, cell.as_box().get_bounding_box_size())
+                cell.is_winning = True
+                break
+            if check_intersects(reachable_set.get_bounding_box()):
+                intersecting = True
+        if not cell.is_winning and intersecting:
+            if not cell.children:
+                cell.split_cell()
+            cell_list = cell_list + cell.children
     return X_new
 
 
